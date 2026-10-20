@@ -10,6 +10,44 @@
 
 static const char *TMPFILE = "/tmp/duckdb_fuzz_data";
 
+// Constructing a fresh DuckDB instance per input dominated the
+// runtime (~5 exec/s), so a single in-memory instance is reused across
+// inputs and recreated periodically to bound catalog/heap growth. This keeps
+// the fuzzer focused on the CSV/JSON pipelines under test.
+namespace {
+
+duckdb::DuckDB *g_db = nullptr;
+duckdb::Connection *g_con = nullptr;
+size_t g_inputs = 0;
+
+constexpr size_t RESET_INTERVAL = 4096;
+
+void ResetDatabase() {
+	if (g_con) {
+		delete g_con;
+		g_con = nullptr;
+	}
+	if (g_db) {
+		delete g_db;
+		g_db = nullptr;
+	}
+}
+
+void EnsureDatabase() {
+	if (g_db) {
+		return;
+	}
+	g_db = new duckdb::DuckDB(nullptr);
+	g_con = new duckdb::Connection(*g_db);
+	// Disable progress bar / parallelism and set memory/row limits to
+	// prevent resource exhaustion.
+	g_con->Query("SET threads=1");
+	g_con->Query("SET enable_progress_bar=false");
+	g_con->Query("SET max_expression_depth=50");
+}
+
+} // namespace
+
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 	if (size < 2) {
 		return 0;
@@ -25,12 +63,12 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 		payload_size = 8192;
 	}
 
-	duckdb::DuckDB db(nullptr);
-	duckdb::Connection con(db);
-
-	// Disable progress bar and set memory/row limits to prevent resource exhaustion.
-	con.Query("SET enable_progress_bar=false");
-	con.Query("SET max_expression_depth=50");
+	EnsureDatabase();
+	if (++g_inputs % RESET_INTERVAL == 0) {
+		ResetDatabase();
+		EnsureDatabase();
+	}
+	duckdb::Connection &con = *g_con;
 
 	try {
 		switch (selector % 4) {
